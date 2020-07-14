@@ -71,6 +71,16 @@ js_set $e_uri http.encoded_request_uri;
         }
     }
 }
+```
+
+The http.js file only contains code to be able to URL encode the
+original path:
+
+```javascript
+function encoded_request_uri(r) {
+    return encodeURIComponent(r.variables['request_uri']);
+}
+export default { encoded_request_uri }
 ``` 
 
 ### Configure the service
