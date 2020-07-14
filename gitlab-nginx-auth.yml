@@ -1,0 +1,20 @@
+port: 8970
+# cookie-name: gitlab-auth
+client-id: CLIENT-ID
+client-secret: CLIENT-SECRET
+root-path: /_gitlab
+gitlab-url: https://gitlab.com/
+callback-url: http://resource.com/
+
+cookie-name: _this_auth
+cookie-path: /oauth_test
+secure-cookie: false
+access-control:
+-
+  url: ^/oauth-test[/].*
+  groups: [ "x", "babies" ]
+-
+  url: ^/nothing[/].*
+  groups: [ "au" ]
+
+# log: gitlab-nginx.log
