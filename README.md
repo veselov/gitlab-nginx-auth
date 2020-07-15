@@ -2,10 +2,9 @@
 OAuth2 authenticator service for Gitlab
 
 This service can be used as NginX authenticator service, used against GitLab as an authentication and authorization provider.
+The service can additionally provide trusted authentication information to the resource server.
 
 Its use requires [ngx_http_js_module][1].
-
-[1]: http://nginx.org/en/docs/http/ngx_http_js_module.html
 
 ## Set-up
 
@@ -59,7 +58,17 @@ js_set $e_uri http.encoded_request_uri;
             # all protected locations.
             auth_request /_gitlab/check;
             error_page 401 @401;
+
+            # sample for an up stream server that can take advantage
+            # of using user identity information
+            proxy_pass http://hidden.server.com/server;
+            auth_request_set $signed_auth $upstream_http_x_signed_auth;
+            # the resource server will receive x-authed header that will
+            # contained signed authentication data
+            proxy_set_header x-authed $signed_auth;
         }
+
+        location /resource_service
 
         location @401 {
             return 302 /_gitlab/init_login?from=$e_uri;
@@ -145,6 +154,34 @@ access-control:
 # can be unset, in which case the log is printed to stdout. 
 log: gitlab-nginx.log
 
+# Specify the page size used for making requests to GitLab (to get the users'
+# group list. Default is 40. Too large of a page size may strain the request,
+# and too small will lead to large number of requests needed to verify the 
+# identity 
+# page-size: 40
+
+# the presence of this object configures and enables service providing
+# signed object containing basic user information and list of the groups
+# the user is a member of.
+sign-user-info:
+  # either private-key or shared-key property must be specified.
+  # private-key must point to a PKCS#1 PEM encoded file containing private
+  # key that will be used to sign the authentication data. The key must
+  # either an elliptic key or an RSA key, depending on the algorithm used.  
+  private-key: key.pem
+  # if algorithm uses a symmetric key, that symmetric key must be provided
+  # here in the hexadecimal format.
+  shared-key: 01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+  # algorithm to use for signing. The following algorithms are supported:
+  # EdDSA, ES256, ES384, ES512, RS256, RS384, RS512, PS256, PS384, PS512
+  # HS256, HS384, HS512 
+  # See https://tools.ietf.org/html/rfc7515 for more information on the
+  # algorithms.
+  algorithm: ES256
+  # the name of the header (default x-signed_auth) that the signed authentication
+  # data is returned in. The data is the compact serialization of the
+  # JWS object containing the JSON serialized object of user information.
+  header-name: x-signed_auth
 ```
 
 ## Authentication Process Overview
@@ -159,7 +196,9 @@ The authenticator service will first look for the previously issued authenticati
 If the cookie is found, it will extract the OAuth access information from the cookie, and 
 make a request to GitLab to get user access information (group list). If the group list
 was returned, it will evaluate the URI against the access control instructions and either issue
-a 204, or 403. In all other cases (cookie not found, access control cannot be extracted, GitLab
+a 204, or 403. Additionally, if configured so, the service will set a header field containing signed
+authentication information that can be accessed by the final resource destination.
+In all other cases (cookie not found, access control cannot be extracted, GitLab
 rejects the groups list request), the service will return 401.
 
 Once 401 is returned, NginX will redirect the user to <auth_context>/init_login, preserving
@@ -183,4 +222,21 @@ to the original URL that was intended to be accessed in the first place.
 Note that this will result in `<auth_context>/check` path to be invoked again,
 however this time the user will have the valid cookie, and their groups
 should match the resource (or 403 will be issued).
- 
+
+### Signed Authentication data
+
+The signed authentication object contains the following properties:
+* user (object)
+  * id (integer) user ID
+  * username (string) user name
+  * name (string) user display name
+* groups (string[]) list of group the user is a member of
+* issued (int) unix timestamp (seconds since Epoch) of when the 
+data was issued. It's up to the resource server to determine how long
+should the data be considered valid for.
+
+The data is serialized as a JSON object, signed using JWS specification, and
+serialized using compact serialization. See [JWS Standard][2]
+
+[1]: http://nginx.org/en/docs/http/ngx_http_js_module.html
+[2]: https://tools.ietf.org/html/rfc7515

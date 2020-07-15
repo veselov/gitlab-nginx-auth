@@ -2,94 +2,113 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/pborman/getopt/v2"
+	"github.com/peterhellberg/link"
 	"github.com/ztrue/tracerr"
 	"gopkg.in/square/go-jose.v2"
 	"gopkg.in/yaml.v2"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"regexp"
+	"strconv"
 	"time"
 )
 
 type Config struct {
-	Port uint16 `yaml:"port"`
-	CookieName string `yaml:"cookie-name"`
-	ClientID string `yaml:"client-id"`
-	ClientSecret string `yaml:"client-secret"`
-	RootPath string `yaml:"root-path"`
-	CookiePath string `yaml:"cookie-path"`
-	GitLabURL string `yaml:"gitlab-url"`
-	CallbackURL string `yaml:"callback-url"`
-	SecureCookie bool `yaml:"secure-cookie"`
+	Port          uint16 `yaml:"port"`
+	CookieName    string `yaml:"cookie-name"`
+	ClientID      string `yaml:"client-id"`
+	ClientSecret  string `yaml:"client-secret"`
+	RootPath      string `yaml:"root-path"`
+	CookiePath    string `yaml:"cookie-path"`
+	GitLabURL     string `yaml:"gitlab-url"`
+	CallbackURL   string `yaml:"callback-url"`
+	SecureCookie  bool   `yaml:"secure-cookie"`
+	PageSize      uint   `yaml:"page-size"`
 	AccessControl []struct {
-		Pattern string `yaml:"pattern"`
-		Groups []string `yaml:"groups"`
+		Pattern  string   `yaml:"pattern"`
+		Groups   []string `yaml:"groups"`
 		Compiled *regexp.Regexp
 	} `yaml:"access-control"`
+	SignUserInfo *struct {
+		PrivateKeyFile string `yaml:"private-key"`
+		SharedKey      string `yaml:"shared-key"`
+		Algorithm      string `yaml:"algorithm"`
+		HeaderName     string `yaml:"header-name"`
+	} `yaml:"sign-user-info"`
 	Log string `yaml:"log"`
 }
 
 type GitlabToken struct {
 	AccessToken string `json:"access_token"`
-	ExpiresIn int `json:"expires_in"`
+	ExpiresIn   uint   `json:"expires_in"`
 }
 
-/*
 type GitlabUser struct {
-	Id string `json:"id"`
-	Username string `json:"username"`
+	Id       uint   `json:"id"`
+	UserName string `json:"username"`
+	Name     string `json:"name"`
 }
-*/
+
+type SignedUserInfo struct {
+	User   GitlabUser `json:"user"`
+	Groups []string   `json:"groups"`
+	Issued uint64     `json:"issued"`
+}
 
 type GitlabGroup struct {
 	Name string `json:"name"`
 }
 
 type AuthInfo struct {
-	Token string `json:"token"`
-	Expiry int64 `json:"expiry"`
+	Token  string `json:"token"`
+	Expiry int64  `json:"expiry"`
 }
 
 type SimpleError struct {
 	Err string
 }
 
+type LogWriter struct {
+}
+
+var cfg Config
+
+// var key []byte = make([]byte, 32)
+var key [32]byte
+var xLog *log.Logger
+var logWriter = LogWriter{}
+var userInfoSigner *jose.Signer
+
 func (e SimpleError) Error() string {
 	return e.Err
 }
 
-var cfg Config
-// var key []byte = make([]byte, 32)
-var key [32]byte
-var xLog *log.Logger
-
-type LogWriter struct {
-}
-
-var logWriter = LogWriter{}
-
-func (w * LogWriter) Write(p []byte) (n int, err error) {
+func (w *LogWriter) Write(p []byte) (n int, err error) {
 	xLog.Printf("%s", string(p))
 	return len(p), nil
 }
 
 func processConfigError(cfgFile string, err error) {
 	if err != nil {
-		xLog.Printf("Can not read %s: %s", cfgFile, err.Error())
+		fmt.Printf("Can not read %s: %s\n", cfgFile, err.Error())
 		os.Exit(1)
 	}
 }
 
 func doErr(err error) {
 	if err != nil {
-		tracerr.PrintSourceColor(err)
+		xLog.Printf("%s", tracerr.SprintSource(err, 10))
 	}
 }
 
@@ -114,8 +133,51 @@ func main() {
 	// fmt.Printf("cfgFilePath: %s\n", *cfgFilePath)
 
 	cfg = loadConfig(*cfgFilePath)
-	if cfg.CookieName == "" { cfg.CookieName = "_this_auth" }
-	if cfg.CookiePath == "" { cfg.CookiePath = "/" }
+	if cfg.CookieName == "" {
+		cfg.CookieName = "_this_auth"
+	}
+	if cfg.CookiePath == "" {
+		cfg.CookiePath = "/"
+	}
+	if cfg.PageSize == 0 {
+		cfg.PageSize = 40
+	}
+
+	if cfg.SignUserInfo != nil {
+
+		kAlg := jose.SignatureAlgorithm(cfg.SignUserInfo.Algorithm)
+		var keyData interface{}
+
+		var err error
+		var rawKeyData []byte
+
+		switch kAlg {
+		case jose.EdDSA, jose.ES256, jose.ES384, jose.ES512:
+			rawKeyData, err = getKeyDer("EC PRIVATE KEY")
+			processConfigError(*cfgFilePath, err)
+			keyData, err = x509.ParseECPrivateKey(rawKeyData)
+			processConfigError(*cfgFilePath, err)
+			break
+		case jose.RS256, jose.RS384, jose.RS512, jose.PS256, jose.PS384, jose.PS512:
+			rawKeyData, err = getKeyDer("RSA PRIVATE KEY")
+			processConfigError(*cfgFilePath, err)
+			keyData, err = x509.ParsePKCS1PrivateKey(rawKeyData)
+			processConfigError(*cfgFilePath, err)
+		case jose.HS256, jose.HS384, jose.HS512:
+			keyData, err = hex.DecodeString(cfg.SignUserInfo.SharedKey)
+			processConfigError(*cfgFilePath, err)
+		default:
+			processConfigError(*cfgFilePath, SimpleError{Err: fmt.Sprintf("Unsupported key algorithm %s", kAlg)})
+		}
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: kAlg, Key: keyData}, nil)
+		processConfigError(*cfgFilePath, err)
+		userInfoSigner = &signer
+
+		if cfg.SignUserInfo.HeaderName == "" {
+			cfg.SignUserInfo.HeaderName = "x-signed_auth"
+		}
+
+	}
 
 	regexpErrors := false
 	for i := range cfg.AccessControl[:] {
@@ -126,9 +188,9 @@ func main() {
 			fmt.Printf("Can not compile regular rexpression %s: %s", acl.Pattern, err.Error())
 			regexpErrors = true
 			/*
-		} else {
-			fmt.Printf("Compiled %s -> %s\n", acl.Pattern, acl.Compiled.String())
-			 */
+				} else {
+					fmt.Printf("Compiled %s -> %s\n", acl.Pattern, acl.Compiled.String())
+			*/
 		}
 	}
 
@@ -152,7 +214,7 @@ func main() {
 		xLog = log.New(os.Stdout, "", 0)
 	} else {
 		gin.DisableConsoleColor()
-		f, err := os.OpenFile(cfg.Log, os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0755))
+		f, err := os.OpenFile(cfg.Log, os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0644))
 		processConfigError(*cfgFilePath, err)
 		xLog = log.New(f, "", 0)
 		//noinspection GoUnhandledErrorResult
@@ -162,13 +224,11 @@ func main() {
 	gin.DefaultWriter = &logWriter
 
 	r := gin.Default()
-	// r := gin.New()
-	// r.Use(gin.Recovery())
 
 	r.Use()
 
 	root := r.Group(cfg.RootPath)
-	root.GET("/check", func(c *gin.Context){
+	root.GET("/check", func(c *gin.Context) {
 
 		var err error
 
@@ -176,28 +236,88 @@ func main() {
 
 			uri := c.GetHeader("x-original-uri")
 			if uri == "" {
-				c.AbortWithError(400, SimpleError{Err: "No original URL header in request"})
+				c.AbortWithError(400, SimpleError{Err: "No original URI header in request"})
 				return
 			}
 
 			var jweCookie string
 			jweCookie, err = c.Cookie(cfg.CookieName)
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 			var jwe *jose.JSONWebEncryption
 			jwe, err = jose.ParseEncrypted(jweCookie)
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 			var jsonData []byte
 			jsonData, err = jwe.Decrypt(key[:])
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 			authData := AuthInfo{}
 			err = json.Unmarshal(jsonData, &authData)
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 
-			if authData.Expiry < time.Now().Unix() { break }
+			now := time.Now().Unix()
+			if authData.Expiry > 0 && authData.Expiry < now {
+				err = SimpleError{Err: fmt.Sprintf("token expired (at %d, now is %d), need to refresh", authData.Expiry, now)}
+				break
+			}
 
 			var groups []GitlabGroup
-			groups, err = getGroups(authData.Token)
-			if err != nil { break }
+			groups, err = getGroups(authData.Token, false)
+			if err != nil {
+				break
+			}
+			if userInfoSigner != nil {
+
+				var user *GitlabUser
+				user, err = getUserInfo(authData.Token)
+				if err != nil {
+					break
+				}
+
+				groupNames := []string{}
+				for _, group := range groups {
+					groupNames = append(groupNames, group.Name)
+				}
+
+				objToSign := SignedUserInfo{
+					User:   *user,
+					Groups: groupNames,
+					Issued: uint64(now),
+				}
+
+				var bytesToSign []byte
+				bytesToSign, err = json.Marshal(&objToSign)
+
+				xLog.Printf("json to sign:%s", bytesToSign)
+
+				if err == nil {
+					var jws *jose.JSONWebSignature
+					jws, err = (*userInfoSigner).Sign(bytesToSign)
+					if err == nil {
+
+						var compact string
+						compact, err = jws.CompactSerialize()
+
+						if err == nil {
+							xLog.Printf("Adding header %s with %s", cfg.SignUserInfo.HeaderName, compact)
+							c.Header(cfg.SignUserInfo.HeaderName, compact)
+						}
+
+					}
+				}
+
+				if err != nil {
+					doErr(err)
+					err = nil
+				}
+
+			}
 
 			haveGroups := map[string]bool{}
 			for _, ch := range groups {
@@ -236,7 +356,7 @@ func main() {
 
 		c.Status(401)
 	})
-	root.GET("/finish_login", func(c *gin.Context){
+	root.GET("/finish_login", func(c *gin.Context) {
 		// we set parameter "from" to contain the URL that we shall send the user to.
 		// we get parameter "token" from Gitlab, which contains the authentication juice
 		// try to get the user info then
@@ -253,37 +373,61 @@ func main() {
 
 			var token *GitlabToken
 			token, err = getAccessToken(code)
-			if err != nil { break }
-
-			// check if the access token even works before
-			// signalling success.
-			_, err = getGroups(token.AccessToken)
 			if err != nil {
 				break
 			}
 
-			authInfo := AuthInfo {
-				Token:  token.AccessToken,
-				Expiry: time.Now().Add(time.Duration(token.ExpiresIn) * time.Second).Unix(),
+			// check if the access token even works before
+			// signalling success.
+
+			_, err = getGroups(token.AccessToken, true)
+			if err != nil {
+				break
 			}
+
+			now := time.Now()
+			var expireAt int64
+			if token.ExpiresIn == 0 {
+				expireAt = 0
+			} else {
+				expireAt = now.Add(time.Duration(token.ExpiresIn) * time.Second).Unix()
+			}
+			authInfo := AuthInfo{
+				Token:  token.AccessToken,
+				Expiry: expireAt,
+			}
+
+			// xLog.Printf("Token will expire in %d, set expiry to %d, now is %d", token.ExpiresIn, authInfo.Expiry, now.Unix())
 
 			var jsonObj []byte
 			jsonObj, err = json.Marshal(authInfo)
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 
 			var enc jose.Encrypter
 			enc, err = jose.NewEncrypter(jose.A128CBC_HS256, jose.Recipient{Algorithm: jose.A256GCMKW, Key: key[:]}, nil)
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 
 			var jwe *jose.JSONWebEncryption
 			jwe, err = enc.Encrypt(jsonObj)
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 
 			var jweStr string
 			jweStr, err = jwe.CompactSerialize()
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 
-			c.SetCookie(cfg.CookieName, jweStr, token.ExpiresIn, cfg.CookiePath, "", cfg.SecureCookie, true)
+			expiresIn := token.ExpiresIn
+			if expiresIn <= 0 {
+				expiresIn = 100000
+			}
+			c.SetCookie(cfg.CookieName, jweStr, int(expiresIn), cfg.CookiePath, "", cfg.SecureCookie, true)
 
 			to, exists := c.GetQuery("state")
 			var rdrTo string
@@ -305,34 +449,69 @@ func main() {
 	})
 	root.GET("/init_login", func(c *gin.Context) {
 
+		var err error
+
 		for {
 
-			// myUrl, err := makeMyURL("/finish_login", map[string]string {"from": c.Query("from")})
-			myUrl, err := makeMyURL("/finish_login", nil)
-			if err != nil { break }
+			var myUrl *string
+			myUrl, err = makeMyURL("/finish_login", nil)
+			if err != nil {
+				break
+			}
 
-			rUrl, err := makeGitlabURL("/oauth/authorize", map[string] string {
-				"client_id" : cfg.ClientID,
-				"redirect_uri" : *myUrl,
-				"scope" : "read_api",
-				"state" : c.Query("from"),
-				"response_type" : "code",
+			var rUrl *string
+			rUrl, err = makeGitlabURL("/oauth/authorize", map[string]string{
+				"client_id":     cfg.ClientID,
+				"redirect_uri":  *myUrl,
+				"scope":         "read_api",
+				"state":         c.Query("from"),
+				"response_type": "code",
 			})
 
-			if err != nil { break }
+			if err != nil {
+				break
+			}
 
 			c.Redirect(302, *rUrl)
 			return
 
 		}
 
+		doErr(err)
 		c.Status(500)
 
 	})
+	xLog.Printf("Starting auth service, port %d", cfg.Port)
 	err = r.Run(fmt.Sprintf("127.0.0.1:%d", cfg.Port))
 	if err != nil {
 		xLog.Printf("%s", err.Error())
 	}
+
+}
+
+func getKeyDer(objType string) ([]byte, error) {
+
+	fileName := cfg.SignUserInfo.PrivateKeyFile
+	file, err := os.Open(fileName)
+	if err != nil {
+		return nil, err
+	}
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, SimpleError{Err: fmt.Sprintf("Failed to read PEM data from %s - no PEM block found", fileName)}
+	}
+	if block.Type != objType {
+		return nil, SimpleError{
+			Err: fmt.Sprintf("Failed to read PEM data from %s - wanted data of type %s, got %s instead",
+				fileName, objType, block.Type),
+		}
+	}
+
+	return block.Bytes, nil
 
 }
 
@@ -349,25 +528,27 @@ func getAccessToken(code string) (*GitlabToken, error) {
 	}
 
 	res, err := http.PostForm(*targetUrl, url.Values{
-		"client_id": {cfg.ClientID},
-		"client_secret":{cfg.ClientSecret},
-		"code":{code},
-		"grant_type": {"authorization_code"},
-		"redirect_uri": {*myUrl},
+		"client_id":     {cfg.ClientID},
+		"client_secret": {cfg.ClientSecret},
+		"code":          {code},
+		"grant_type":    {"authorization_code"},
+		"redirect_uri":  {*myUrl},
 	})
 
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	//noinspection GoUnhandledErrorResult
 	defer res.Body.Close()
 
 	/*
-	input, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-		fmt.Printf("token post: %s: %s\n", res.Status, string(input))
-	 */
+		input, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			return nil, err
+		}
+			fmt.Printf("token post: %s: %s\n", res.Status, string(input))
+	*/
 
 	if res.StatusCode != 200 {
 		return nil, SimpleError{Err: fmt.Sprintf("Requesting token at %s: %d", *targetUrl, res.StatusCode)}
@@ -377,57 +558,116 @@ func getAccessToken(code string) (*GitlabToken, error) {
 	d := json.NewDecoder(res.Body)
 	err = d.Decode(&gitlabToken)
 	// err = json.Unmarshal(input, &gitlabToken)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return &gitlabToken, err
 
 }
 
-func getGroups(token string) ([]GitlabGroup, error) {
+func getGroups(token string, justProbe bool) ([]GitlabGroup, error) {
 
-	var groups []GitlabGroup
-	err := getGitLabObject(token, "/api/v4/groups", &groups, map[string]string {"min_access_level":"10"})
-	if err != nil { return nil, err }
-	return groups, nil
+	var allGroups *[]GitlabGroup
+	var next *string
+
+	for {
+		var groups []GitlabGroup
+		var err error
+
+		if next == nil {
+			var pageSize string
+			if justProbe {
+				pageSize = "1"
+			} else {
+				pageSize = strconv.FormatUint(uint64(cfg.PageSize), 10)
+			}
+			next, err = getGitLabObject(token, "/api/v4/groups", &groups,
+				map[string]string{
+					"min_access_level": "10",
+					"per_page":         pageSize,
+				})
+		} else {
+			next, err = getGitLabObjectFromURL(token, *next, &groups)
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		if justProbe || (next == nil && allGroups == nil) {
+			return groups, nil
+		}
+
+		if allGroups == nil {
+			allGroups = &groups
+		} else {
+			groups = append(*allGroups, groups...)
+			allGroups = &groups
+		}
+
+		if next == nil {
+			return *allGroups, nil
+		}
+
+	}
 
 }
 
-func getGitLabObject(token string, path string, into interface{}, query map[string]string) error {
+func getGitLabObjectFromURL(token string, dUrl string, into interface{}) (*string, error) {
 
-	dUrl, err := urlStringWithQuery(cfg.GitLabURL, path, query)
-	if err != nil { return err }
-	req, err := http.NewRequest("GET", *dUrl, nil)
-	if err != nil { return err }
+	req, err := http.NewRequest("GET", dUrl, nil)
+	if err != nil {
+		return nil, err
+	}
 	client := http.DefaultClient
 	// fmt.Printf("Authorizing with %s\n", token)
-	req.Header.Add("Authorization", "BEARER " + token)
+	req.Header.Add("Authorization", "BEARER "+token)
 
 	res, err := client.Do(req)
-	if err != nil { return err }
+	if err != nil {
+		return nil, err
+	}
 
 	//noinspection GoUnhandledErrorResult
 	defer res.Body.Close()
 
-	xLog.Printf("invoked %s, got %s\n", *dUrl, res.Status)
+	xLog.Printf("invoked %s, got %s\n", dUrl, res.Status)
 
 	if res.StatusCode != 200 {
-		return SimpleError{fmt.Sprintf("Response for %s: %d", *dUrl, res.StatusCode)}
+		return nil, SimpleError{fmt.Sprintf("Response for %s: %d", dUrl, res.StatusCode)}
 	}
 
 	d := json.NewDecoder(res.Body)
 	err = d.Decode(into)
-	if err != nil { return err }
-	return nil
+	if err != nil {
+		return nil, err
+	}
+
+	if next := link.ParseHeader(res.Header)["next"]; next != nil {
+		nextStr := next.String()
+		return &nextStr, nil
+	} else {
+		return nil, nil
+	}
 
 }
 
-/*
+func getGitLabObject(token string, path string, into interface{}, query map[string]string) (*string, error) {
+	dUrl, err := urlStringWithQuery(cfg.GitLabURL, path, query)
+	if err != nil {
+		return nil, err
+	}
+	return getGitLabObjectFromURL(token, *dUrl, into)
+}
+
 func getUserInfo(token string) (*GitlabUser, error) {
 	var user GitlabUser
-	err := getGitLabObject(token, "/api/v4/user", user, nil)
-	if err != nil { return nil, err }
+	_, err := getGitLabObject(token, "/api/v4/user", &user, nil)
+	if err != nil {
+		return nil, err
+	}
 	return &user, nil
 }
-*/
 
 func urlWithQuery(from string, wsPath string, query map[string]string) (*url.URL, error) {
 	rUrl, err := url.Parse(from)
@@ -438,7 +678,7 @@ func urlWithQuery(from string, wsPath string, query map[string]string) (*url.URL
 	rUrl.Path = path.Join(rUrl.Path, wsPath)
 	values := url.Values{}
 	if query != nil {
-		for k,v := range query {
+		for k, v := range query {
 			values.Add(k, v)
 		}
 	}
@@ -448,13 +688,15 @@ func urlWithQuery(from string, wsPath string, query map[string]string) (*url.URL
 
 func urlStringWithQuery(from string, path string, query map[string]string) (*string, error) {
 	rUrl, err := urlWithQuery(from, path, query)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	str := rUrl.String()
 	return &str, nil
 }
 
 func makeMyURL(path string, query map[string]string) (*string, error) {
-	return urlStringWithQuery(cfg.CallbackURL, cfg.RootPath + path, query)
+	return urlStringWithQuery(cfg.CallbackURL, cfg.RootPath+path, query)
 }
 
 func makeGitlabURL(path string, query map[string]string) (*string, error) {
