@@ -118,6 +118,7 @@ func main() {
 
 	cfgFilePath := getopt.String('c', "", "Configuration file")
 	helpFlag := getopt.Bool('h', "Print usage")
+	testURI := getopt.String('t', "", "Debug URI matching for the specified URI")
 
 	getopt.Parse()
 
@@ -141,6 +142,46 @@ func main() {
 	}
 	if cfg.PageSize == 0 {
 		cfg.PageSize = 40
+	}
+
+	regexpErrors := false
+	for i := range cfg.AccessControl[:] {
+		var err error
+		acl := &cfg.AccessControl[i]
+		acl.Compiled, err = regexp.Compile(acl.Pattern)
+		if err != nil {
+			fmt.Printf("Can not compile regular rexpression %s: %s", acl.Pattern, err.Error())
+			regexpErrors = true
+			/*
+				} else {
+					fmt.Printf("Compiled %s -> %s\n", acl.Pattern, acl.Compiled.String())
+			*/
+		}
+	}
+
+	if regexpErrors {
+		processConfigError(*cfgFilePath, SimpleError{Err: "Regular expression errors"})
+	}
+
+	if len(cfg.AccessControl) == 0 {
+		processConfigError(*cfgFilePath, SimpleError{Err: "No access control defined"})
+	}
+
+	if testURI != nil && *testURI != "" {
+		patternMatched := false
+		for _, acl := range cfg.AccessControl {
+			if acl.Compiled.MatchString(*testURI) {
+				patternMatched = true
+				fmt.Printf("%s matched against %s\n", *testURI, acl.Pattern)
+				for _, group := range acl.Groups {
+					fmt.Printf("OK for group %s\n", group)
+				}
+			}
+		}
+		if !patternMatched {
+			fmt.Printf("No pattern matched against %s\n", *testURI)
+		}
+		os.Exit(0)
 	}
 
 	if cfg.SignUserInfo != nil {
@@ -177,29 +218,6 @@ func main() {
 			cfg.SignUserInfo.HeaderName = "x-signed_auth"
 		}
 
-	}
-
-	regexpErrors := false
-	for i := range cfg.AccessControl[:] {
-		var err error
-		acl := &cfg.AccessControl[i]
-		acl.Compiled, err = regexp.Compile(acl.Pattern)
-		if err != nil {
-			fmt.Printf("Can not compile regular rexpression %s: %s", acl.Pattern, err.Error())
-			regexpErrors = true
-			/*
-				} else {
-					fmt.Printf("Compiled %s -> %s\n", acl.Pattern, acl.Compiled.String())
-			*/
-		}
-	}
-
-	if regexpErrors {
-		processConfigError(*cfgFilePath, SimpleError{Err: "Regular expression errors"})
-	}
-
-	if len(cfg.AccessControl) == 0 {
-		processConfigError(*cfgFilePath, SimpleError{Err: "No access control defined"})
 	}
 
 	_, err := rand.Read(key[:])

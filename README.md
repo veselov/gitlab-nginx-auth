@@ -143,7 +143,8 @@ access-control:
 #   access is denied
 # - evaluation found a pattern that match the request URI, and 
 #   the user was found to be part of at least one listed group,
-#   in which case the access is granted.
+#   in which case the access is granted. The pattern is evaluated
+#   according to perlre (https://perldoc.perl.org/perlre.html)
   pattern: ^/oauth-test[/].*
   groups: [ "x", "babies" ]
 -
@@ -155,7 +156,7 @@ access-control:
 log: gitlab-nginx.log
 
 # Specify the page size used for making requests to GitLab (to get the users'
-# group list. Default is 40. Too large of a page size may strain the request,
+# group list). Default is 40. Too large of a page size may strain the request,
 # and too small will lead to large number of requests needed to verify the 
 # identity 
 # page-size: 40
@@ -210,7 +211,7 @@ to retrieve user information)
 
 GitLab, after performing necessary authentication procedures, will redirect
 the user back to `http://resource.com/<auth_context>/finish_login`. The intended
-resource URL will still be saved in the redirected URL. The `finish-login`
+resource URL will still be saved in the redirected URL. The `finish_login`
 endpoint is again processed by the authenticator service. That invocation contains
 a code that allows the authenticator to request an access token to GitLab. 
 Once the access token is received, that access token is immediately used
