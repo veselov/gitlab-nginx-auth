@@ -139,6 +139,11 @@ cookie-path: /oauth_test
 # whether mark cookie as secure. This should be set to true if
 # the resource URL is secure.
 secure-cookie: false
+# To support accepting personal access tokens, specify header
+# where such token should be found. If the token is found in
+# the request, then the cookie is not checked.
+# pat-header: x-gitlab-access
+
 # the access control section controls which users have access
 # to which resources. Access control can only be done by means of
 # groups. A user must be part of a specific GitLab group, with at
@@ -179,6 +184,7 @@ log: gitlab-nginx.log
 # "Url" is populated from the "from" URL parameter of the request, and
 # "Groups" is populated with all the groups, membership to any of which would
 # have allowed access to the resource.
+# The template must comply to https://golang.org/pkg/text/template/
 # refused-template: refused.gohtml
 
 # the presence of this object configures and enables service providing

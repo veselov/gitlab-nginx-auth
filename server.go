@@ -29,6 +29,7 @@ import (
 type Config struct {
 	Port          uint16 `yaml:"port"`
 	CookieName    string `yaml:"cookie-name"`
+	PAT           string `yaml:"pat-header"`
 	ClientID      string `yaml:"client-id"`
 	ClientSecret  string `yaml:"client-secret"`
 	RootPath      string `yaml:"root-path"`
@@ -270,42 +271,55 @@ func main() {
 				return
 			}
 
-			var jweCookie string
-			jweCookie, err = c.Cookie(cfg.CookieName)
-			if err != nil {
-				break
-			}
-			var jwe *jose.JSONWebEncryption
-			jwe, err = jose.ParseEncrypted(jweCookie)
-			if err != nil {
-				break
-			}
-			var jsonData []byte
-			jsonData, err = jwe.Decrypt(key[:])
-			if err != nil {
-				break
-			}
-			authData := AuthInfo{}
-			err = json.Unmarshal(jsonData, &authData)
-			if err != nil {
-				break
+			token := ""
+
+			if cfg.PAT != "" {
+				token = c.GetHeader(cfg.PAT)
 			}
 
 			now := time.Now().Unix()
-			if authData.Expiry > 0 && authData.Expiry < now {
-				err = SimpleError{Err: fmt.Sprintf("token expired (at %d, now is %d), need to refresh", authData.Expiry, now)}
-				break
+
+			if token == "" {
+
+				var jweCookie string
+				jweCookie, err = c.Cookie(cfg.CookieName)
+				if err != nil {
+					break
+				}
+				var jwe *jose.JSONWebEncryption
+				jwe, err = jose.ParseEncrypted(jweCookie)
+				if err != nil {
+					break
+				}
+				var jsonData []byte
+				jsonData, err = jwe.Decrypt(key[:])
+				if err != nil {
+					break
+				}
+				authData := AuthInfo{}
+				err = json.Unmarshal(jsonData, &authData)
+				if err != nil {
+					break
+				}
+
+				if authData.Expiry > 0 && authData.Expiry < now {
+					err = SimpleError{Err: fmt.Sprintf("token expired (at %d, now is %d), need to refresh", authData.Expiry, now)}
+					break
+				}
+
+				token = authData.Token
+
 			}
 
 			var groups []GitlabGroup
-			groups, err = getGroups(authData.Token, false)
+			groups, err = getGroups(token, false)
 			if err != nil {
 				break
 			}
 			if userInfoSigner != nil {
 
 				var user *GitlabUser
-				user, err = getUserInfo(authData.Token)
+				user, err = getUserInfo(token)
 				if err != nil {
 					break
 				}

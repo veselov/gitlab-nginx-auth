@@ -23,6 +23,11 @@ cookie-path: /oauth_test
 # whether mark cookie as secure. This should be set to true if
 # the resource URL is secure.
 secure-cookie: false
+# To support accepting personal access tokens, specify header
+# where such token should be found. If the token is found in
+# the request, then the cookie is not checked.
+# pat-header: x-gitlab-access
+
 # the access control section controls which users have access
 # to which resources. Access control can only be done by means of
 # groups. A user must be part of a specific GitLab group, with at
@@ -39,7 +44,8 @@ access-control:
     #   access is denied
     # - evaluation found a pattern that match the request URI, and
     #   the user was found to be part of at least one listed group,
-    #   in which case the access is granted.
+    #   in which case the access is granted. The pattern is evaluated
+    #   according to perlre (https://perldoc.perl.org/perlre.html)
     pattern: ^/oauth-test[/].*
     groups: [ "x", "babies" ]
   -
@@ -51,10 +57,19 @@ access-control:
 log: gitlab-nginx.log
 
 # Specify the page size used for making requests to GitLab (to get the users'
-# group list. Default is 40. Too large of a page size may strain the request,
+# group list). Default is 40. Too large of a page size may strain the request,
 # and too small will lead to large number of requests needed to verify the
 # identity
 # page-size: 40
+
+# If enabled, then a ./refused_login endpoint will use this template
+# to display a page explaining why access has been refused. The template
+# receives a structure with "Url" string property and "Groups" string array.
+# "Url" is populated from the "from" URL parameter of the request, and
+# "Groups" is populated with all the groups, membership to any of which would
+# have allowed access to the resource.
+# The template must comply to https://golang.org/pkg/text/template/
+# refused-template: refused.gohtml
 
 # the presence of this object configures and enables service providing
 # signed object containing basic user information and list of the groups
@@ -77,4 +92,3 @@ sign-user-info:
   # the name of the header (default x-signed_auth) that the signed authentication
   # data is returned in. The data is the compact serialization of the
   # JWS object containing the JSON serialized object of user information.
-  header-name: x-signed_auth
