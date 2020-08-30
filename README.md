@@ -1,7 +1,8 @@
 # gitlab-nginx-auth
 OAuth2 authenticator service for Gitlab
 
-This service can be used as NginX authenticator service, used against GitLab as an authentication and authorization provider.
+This service can be used as NginX authenticator service, used against GitLab as an authentication and authorization 
+provider.
 The service can additionally provide trusted authentication information to the resource server.
 
 Its use requires [ngx_http_js_module][1].
@@ -58,6 +59,9 @@ js_set $e_uri http.encoded_request_uri;
             # all protected locations.
             auth_request /_gitlab/check;
             error_page 401 @401;
+            // comment the next line out if you don't need a 403
+            // page explaining access restrictions control.
+            error_page 403 @403;
 
             # sample for an up stream server that can take advantage
             # of using user identity information
@@ -69,6 +73,14 @@ js_set $e_uri http.encoded_request_uri;
         }
 
         location /resource_service
+
+        // comment this out if you don't want a custom 403 page
+        location @403 {
+            // you can use 302, but this will rewrite the URL in the browser,
+            // which may not be desirable
+            # return 302 /_gitlab/refused_login?from=$e_uri;
+            proxy_pass http://127.0.0.1:8970/_gitlab/refused_login?from=$e_uri;
+        }
 
         location @401 {
             return 302 /_gitlab/init_login?from=$e_uri;
@@ -160,6 +172,14 @@ log: gitlab-nginx.log
 # and too small will lead to large number of requests needed to verify the 
 # identity 
 # page-size: 40
+
+# If enabled, then a ./refused_login endpoint will use this template
+# to display a page explaining why access has been refused. The template
+# receives a structure with "Url" string property and "Groups" string array.
+# "Url" is populated from the "from" URL parameter of the request, and
+# "Groups" is populated with all the groups, membership to any of which would
+# have allowed access to the resource.
+# refused-template: refused.gohtml
 
 # the presence of this object configures and enables service providing
 # signed object containing basic user information and list of the groups

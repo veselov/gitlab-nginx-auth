@@ -10,9 +10,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pborman/getopt/v2"
 	"github.com/peterhellberg/link"
+	"github.com/scylladb/go-set/strset"
 	"github.com/ztrue/tracerr"
 	"gopkg.in/square/go-jose.v2"
 	"gopkg.in/yaml.v2"
+	"html/template"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -46,7 +48,8 @@ type Config struct {
 		Algorithm      string `yaml:"algorithm"`
 		HeaderName     string `yaml:"header-name"`
 	} `yaml:"sign-user-info"`
-	Log string `yaml:"log"`
+	Log     string `yaml:"log"`
+	Refused string `yaml:"refused-template"`
 }
 
 type GitlabToken struct {
@@ -89,6 +92,7 @@ var key [32]byte
 var xLog *log.Logger
 var logWriter = LogWriter{}
 var userInfoSigner *jose.Signer
+var refusedTemplate *template.Template
 
 func (e SimpleError) Error() string {
 	return e.Err
@@ -165,6 +169,14 @@ func main() {
 
 	if len(cfg.AccessControl) == 0 {
 		processConfigError(*cfgFilePath, SimpleError{Err: "No access control defined"})
+	}
+
+	if cfg.Refused != "" {
+		var err error
+		refusedTemplate, err = template.ParseFiles(cfg.Refused)
+		if err != nil {
+			processConfigError(*cfgFilePath, err)
+		}
 	}
 
 	if testURI != nil && *testURI != "" {
@@ -298,7 +310,7 @@ func main() {
 					break
 				}
 
-				groupNames := []string{}
+				var groupNames []string
 				for _, group := range groups {
 					groupNames = append(groupNames, group.Name)
 				}
@@ -342,19 +354,11 @@ func main() {
 				haveGroups[ch.Name] = true
 			}
 
-			patternMatched := false
-
-			for _, acl := range cfg.AccessControl {
-				if acl.Compiled.MatchString(uri) {
-					patternMatched = true
-					for _, group := range acl.Groups {
-						if _, ok := haveGroups[group]; ok {
-							xLog.Printf("Request allowed, uri %s matched pattern %s, user has group %s\n", uri, acl.Pattern, group)
-							c.Status(204)
-							return
-						}
-					}
-				}
+			_, patternMatched, ok := matchGroup(uri, &haveGroups)
+			if ok != nil {
+				xLog.Printf("Request allowed, uri %s matched pattern %s, user has group %s\n", uri, ok.Pattern, ok.Group)
+				c.Status(204)
+				return
 			}
 
 			var err403 string
@@ -499,11 +503,69 @@ func main() {
 		c.Status(500)
 
 	})
+
+	root.GET("/refused_login", func(c *gin.Context) {
+
+		c.Status(403)
+		var err error
+		if refusedTemplate == nil {
+			_, err = c.Writer.WriteString("No template configured")
+		} else {
+
+			var uri = c.Query("from")
+			groups, _, _ := matchGroup(uri, nil)
+
+			err = refusedTemplate.Execute(c.Writer, struct {
+				Url    string
+				Groups []string
+			}{
+				uri,
+				groups.List(),
+			})
+		}
+		if err != nil {
+			xLog.Printf("Failed to write refusal document: %s", err.Error())
+		}
+
+	})
+
 	xLog.Printf("Starting auth service, port %d", cfg.Port)
 	err = r.Run(fmt.Sprintf("127.0.0.1:%d", cfg.Port))
 	if err != nil {
 		xLog.Printf("%s", err.Error())
 	}
+
+}
+
+// anonymous structs returned : https://stackoverflow.com/a/33831833/622266
+
+func matchGroup(uri string, haveGroups *map[string]bool) (*strset.Set, bool, *struct {
+	Pattern string
+	Group   string
+}) {
+
+	var patternMatched = false
+	var groups = strset.New()
+
+	for _, acl := range cfg.AccessControl {
+		if acl.Compiled.MatchString(uri) {
+			patternMatched = true
+			for _, group := range acl.Groups {
+				if haveGroups != nil {
+					if _, ok := (*haveGroups)[group]; ok {
+						return nil, true, &struct {
+							Pattern string
+							Group   string
+						}{acl.Pattern, group}
+					}
+				} else {
+					groups.Add(group)
+				}
+			}
+		}
+	}
+
+	return groups, patternMatched, nil
 
 }
 
