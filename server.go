@@ -2,11 +2,14 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"github.com/LK4D4/trylock"
 	"github.com/gin-gonic/gin"
 	"github.com/pborman/getopt/v2"
 	"github.com/peterhellberg/link"
@@ -23,6 +26,7 @@ import (
 	"path"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -38,6 +42,7 @@ type Config struct {
 	CallbackURL   string `yaml:"callback-url"`
 	SecureCookie  bool   `yaml:"secure-cookie"`
 	PageSize      uint   `yaml:"page-size"`
+	DataCacheSec  uint   `yaml:"data-cache-sec"`
 	AccessControl []struct {
 		Pattern  string   `yaml:"pattern"`
 		Groups   []string `yaml:"groups"`
@@ -86,6 +91,19 @@ type SimpleError struct {
 type LogWriter struct {
 }
 
+type MatchResult struct {
+	Pattern string
+	Group   string
+}
+
+type UserCache struct {
+	User     *GitlabUser
+	Groups   *[]GitlabGroup
+	Expires  int64
+	Complete bool
+	lock     trylock.Mutex
+}
+
 var cfg Config
 
 // var key []byte = make([]byte, 32)
@@ -94,6 +112,8 @@ var xLog *log.Logger
 var logWriter = LogWriter{}
 var userInfoSigner *jose.Signer
 var refusedTemplate *template.Template
+var userCache = map[string]*UserCache{}
+var userCacheLock = sync.Mutex{}
 
 func (e SimpleError) Error() string {
 	return e.Err
@@ -157,10 +177,6 @@ func main() {
 		if err != nil {
 			fmt.Printf("Can not compile regular rexpression %s: %s", acl.Pattern, err.Error())
 			regexpErrors = true
-			/*
-				} else {
-					fmt.Printf("Compiled %s -> %s\n", acl.Pattern, acl.Compiled.String())
-			*/
 		}
 	}
 
@@ -311,68 +327,42 @@ func main() {
 
 			}
 
-			var groups []GitlabGroup
-			groups, err = getGroups(token, false)
-			if err != nil {
-				break
-			}
-			if userInfoSigner != nil {
+			var haveGroups *map[string]bool
+			var signature *string
+			cached := true
+			var patternMatched bool
 
-				var user *GitlabUser
-				user, err = getUserInfo(token)
+			for {
+
+				haveGroups, signature, cached, err = getUserData(token, now, cached)
 				if err != nil {
 					break
 				}
 
-				var groupNames []string
-				for _, group := range groups {
-					groupNames = append(groupNames, group.Name)
+				var ok *MatchResult
+
+				_, patternMatched, ok = matchGroup(uri, haveGroups)
+				if ok != nil {
+					xLog.Printf("Request allowed, uri %s matched pattern %s, user has group %s\n", uri, ok.Pattern, ok.Group)
+					c.Status(204)
+					return
 				}
 
-				objToSign := SignedUserInfo{
-					User:   *user,
-					Groups: groupNames,
-					Issued: uint64(now),
+				if !cached {
+					break
 				}
 
-				var bytesToSign []byte
-				bytesToSign, err = json.Marshal(&objToSign)
-
-				xLog.Printf("json to sign:%s", bytesToSign)
-
-				if err == nil {
-					var jws *jose.JSONWebSignature
-					jws, err = (*userInfoSigner).Sign(bytesToSign)
-					if err == nil {
-
-						var compact string
-						compact, err = jws.CompactSerialize()
-
-						if err == nil {
-							xLog.Printf("Adding header %s with %s", cfg.SignUserInfo.HeaderName, compact)
-							c.Header(cfg.SignUserInfo.HeaderName, compact)
-						}
-
-					}
-				}
-
-				if err != nil {
-					doErr(err)
-					err = nil
-				}
+				cached = false // retry the loop, but cached is now forced false
 
 			}
 
-			haveGroups := map[string]bool{}
-			for _, ch := range groups {
-				haveGroups[ch.Name] = true
+			if err != nil {
+				break
 			}
 
-			_, patternMatched, ok := matchGroup(uri, &haveGroups)
-			if ok != nil {
-				xLog.Printf("Request allowed, uri %s matched pattern %s, user has group %s\n", uri, ok.Pattern, ok.Group)
-				c.Status(204)
-				return
+			if signature != nil {
+				xLog.Printf("Adding header %s with %s", cfg.SignUserInfo.HeaderName, *signature)
+				c.Header(cfg.SignUserInfo.HeaderName, *signature)
 			}
 
 			var err403 string
@@ -415,8 +405,7 @@ func main() {
 
 			// check if the access token even works before
 			// signalling success.
-
-			_, err = getGroups(token.AccessToken, true)
+			_, err = retrieveGroups(token.AccessToken, true)
 			if err != nil {
 				break
 			}
@@ -544,6 +533,11 @@ func main() {
 	})
 
 	xLog.Printf("Starting auth service, port %d", cfg.Port)
+
+	if cfg.DataCacheSec > 0 {
+		go cacheCleanUp()
+	}
+
 	err = r.Run(fmt.Sprintf("127.0.0.1:%d", cfg.Port))
 	if err != nil {
 		xLog.Printf("%s", err.Error())
@@ -551,12 +545,101 @@ func main() {
 
 }
 
-// anonymous structs returned : https://stackoverflow.com/a/33831833/622266
+func cacheCleanUp() {
 
-func matchGroup(uri string, haveGroups *map[string]bool) (*strset.Set, bool, *struct {
-	Pattern string
-	Group   string
-}) {
+	for range time.Tick(time.Second) {
+
+		userCacheLock.Lock()
+		now := time.Now().Unix()
+		for key, val := range userCache {
+			// log.Printf("Key %s, complete:%t, expires at %d, now is %d", key, val.Complete, val.Expires, now)
+			if !val.Complete || val.Expires > now {
+				continue
+			}
+			if ok := val.lock.TryLock(); !ok {
+				log.Printf("Can not evict expired key %s, it's locked", key)
+				continue
+			}
+			log.Printf("Evicting expired key %s", key)
+			delete(userCache, key)
+			val.lock.Unlock()
+		}
+		userCacheLock.Unlock()
+
+	}
+
+}
+
+func getUserData(token string, now int64, cache bool) (*map[string]bool, *string, bool, error) {
+
+	var groups *[]GitlabGroup
+	var err error
+	var cached bool
+
+	groups, cached, err = getGroups(token, cache)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	var signature *string
+
+	if userInfoSigner != nil {
+
+		var user *GitlabUser
+		// we don't care if user response was from a cache or not
+		user, _, err = getUserInfo(token, cache)
+		if err != nil {
+			return nil, nil, false, err
+		}
+
+		var groupNames []string
+		for _, group := range *groups {
+			groupNames = append(groupNames, group.Name)
+		}
+
+		objToSign := SignedUserInfo{
+			User:   *user,
+			Groups: groupNames,
+			Issued: uint64(now),
+		}
+
+		var bytesToSign []byte
+		bytesToSign, err = json.Marshal(&objToSign)
+
+		xLog.Printf("json to sign:%s", bytesToSign)
+
+		if err == nil {
+			var jws *jose.JSONWebSignature
+			jws, err = (*userInfoSigner).Sign(bytesToSign)
+			if err == nil {
+
+				var compact string
+				compact, err = jws.CompactSerialize()
+
+				if err == nil {
+					signature = &compact
+				}
+
+			}
+		}
+
+		if err != nil {
+			doErr(err)
+			err = nil
+		}
+
+	}
+
+	haveGroups := map[string]bool{}
+	for _, ch := range *groups {
+		haveGroups[ch.Name] = true
+	}
+
+	return &haveGroups, signature, cached, nil
+
+}
+
+func matchGroup(uri string, haveGroups *map[string]bool) (*strset.Set, bool, *MatchResult) {
 
 	var patternMatched = false
 	var groups = strset.New()
@@ -567,10 +650,7 @@ func matchGroup(uri string, haveGroups *map[string]bool) (*strset.Set, bool, *st
 			for _, group := range acl.Groups {
 				if haveGroups != nil {
 					if _, ok := (*haveGroups)[group]; ok {
-						return nil, true, &struct {
-							Pattern string
-							Group   string
-						}{acl.Pattern, group}
+						return nil, true, &MatchResult{Pattern: acl.Pattern, Group: group}
 					}
 				} else {
 					groups.Add(group)
@@ -636,14 +716,6 @@ func getAccessToken(code string) (*GitlabToken, error) {
 	//noinspection GoUnhandledErrorResult
 	defer res.Body.Close()
 
-	/*
-		input, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			return nil, err
-		}
-			fmt.Printf("token post: %s: %s\n", res.Status, string(input))
-	*/
-
 	if res.StatusCode != 200 {
 		return nil, SimpleError{Err: fmt.Sprintf("Requesting token at %s: %d", *targetUrl, res.StatusCode)}
 	}
@@ -651,7 +723,6 @@ func getAccessToken(code string) (*GitlabToken, error) {
 	var gitlabToken GitlabToken
 	d := json.NewDecoder(res.Body)
 	err = d.Decode(&gitlabToken)
-	// err = json.Unmarshal(input, &gitlabToken)
 	if err != nil {
 		return nil, err
 	}
@@ -659,7 +730,7 @@ func getAccessToken(code string) (*GitlabToken, error) {
 
 }
 
-func getGroups(token string, justProbe bool) ([]GitlabGroup, error) {
+func retrieveGroups(token string, justProbe bool) ([]GitlabGroup, error) {
 
 	var allGroups *[]GitlabGroup
 	var next *string
@@ -704,6 +775,95 @@ func getGroups(token string, justProbe bool) ([]GitlabGroup, error) {
 		}
 
 	}
+
+}
+
+func getGroups(token string, cached bool) (*[]GitlabGroup, bool, error) {
+
+	if cfg.DataCacheSec == 0 {
+		g, e := retrieveGroups(token, false)
+		return &g, false, e
+	}
+
+	cache, cached, err := getFromCache(token, cached)
+	if err != nil {
+		return nil, false, err
+	}
+	return cache.Groups, cached, nil
+
+}
+
+func retrieveUserInfo(token string) (*GitlabUser, error) {
+	var user GitlabUser
+	_, err := getGitLabObject(token, "/api/v4/user", &user, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func getUserInfo(token string, cached bool) (*GitlabUser, bool, error) {
+	if cfg.DataCacheSec == 0 {
+		g, e := retrieveUserInfo(token)
+		return g, false, e
+	}
+
+	cache, cached, err := getFromCache(token, cached)
+	if err != nil {
+		return nil, false, err
+	}
+	return cache.User, cached, nil
+}
+
+func getFromCache(token string, cached bool) (*UserCache, bool, error) {
+
+	tokenSha := sha256.Sum256([]byte(token))
+	cacheKey := base64.StdEncoding.EncodeToString(tokenSha[:])
+	userCacheLock.Lock()
+	userObj := userCache[cacheKey]
+	if userObj == nil {
+		// userObj = &UserCache{lock: sync.Mutex{}}
+		// userObj = &UserCache{lock: trylock.New()}
+		userObj = &UserCache{}
+		userCache[cacheKey] = userObj
+	}
+	userCacheLock.Unlock()
+	userObj.lock.Lock()
+	defer userObj.lock.Unlock()
+
+	if !cached || time.Now().Unix() > userObj.Expires {
+		log.Printf("Reloading cache for %s, forced:%t", cacheKey, !cached)
+		cached = false
+		err := updateCache(token, userObj)
+		if err != nil {
+			return nil, false, err
+		}
+	} else {
+		log.Printf("Cache hit for %s", cacheKey)
+	}
+
+	return userObj, cached, nil
+
+}
+
+func updateCache(token string, userObj *UserCache) error {
+
+	userObj.Complete = true
+
+	user, err := retrieveUserInfo(token)
+	if err != nil {
+		return err
+	}
+	groups, err := retrieveGroups(token, false)
+	if err != nil {
+		return err
+	}
+
+	userObj.Expires = time.Now().Unix() + int64(cfg.DataCacheSec)
+	userObj.Groups = &groups
+	userObj.User = user
+
+	return nil
 
 }
 
@@ -752,15 +912,6 @@ func getGitLabObject(token string, path string, into interface{}, query map[stri
 		return nil, err
 	}
 	return getGitLabObjectFromURL(token, *dUrl, into)
-}
-
-func getUserInfo(token string) (*GitlabUser, error) {
-	var user GitlabUser
-	_, err := getGitLabObject(token, "/api/v4/user", &user, nil)
-	if err != nil {
-		return nil, err
-	}
-	return &user, nil
 }
 
 func urlWithQuery(from string, wsPath string, query map[string]string) (*url.URL, error) {

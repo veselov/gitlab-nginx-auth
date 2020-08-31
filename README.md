@@ -178,6 +178,14 @@ log: gitlab-nginx.log
 # identity 
 # page-size: 40
 
+# To enable caching of the responses from Gitlab (which can be quite slow)
+# specify the amount of seconds the responses should be cached for.
+# Cache is reloaded after expiration, or if the user does not have any
+# of the groups required by the resource (so if the user is added to a 
+# missing group, it's not necessary to wait until the cache is expired
+# until the effects are registered)
+# data-cache-sec: 3600
+
 # If enabled, then a ./refused_login endpoint will use this template
 # to display a page explaining why access has been refused. The template
 # receives a structure with "Url" string property and "Groups" string array.
