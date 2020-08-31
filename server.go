@@ -552,15 +552,15 @@ func cacheCleanUp() {
 		userCacheLock.Lock()
 		now := time.Now().Unix()
 		for key, val := range userCache {
-			// log.Printf("Key %s, complete:%t, expires at %d, now is %d", key, val.Complete, val.Expires, now)
+			// xLog.Printf("Key %s, complete:%t, expires at %d, now is %d", key, val.Complete, val.Expires, now)
 			if !val.Complete || val.Expires > now {
 				continue
 			}
 			if ok := val.lock.TryLock(); !ok {
-				log.Printf("Can not evict expired key %s, it's locked", key)
+				xLog.Printf("Can not evict expired key %s, it's locked", key)
 				continue
 			}
-			log.Printf("Evicting expired key %s", key)
+			xLog.Printf("Evicting expired key %s", key)
 			delete(userCache, key)
 			val.lock.Unlock()
 		}
@@ -832,14 +832,14 @@ func getFromCache(token string, cached bool) (*UserCache, bool, error) {
 	defer userObj.lock.Unlock()
 
 	if !cached || time.Now().Unix() > userObj.Expires {
-		log.Printf("Reloading cache for %s, forced:%t", cacheKey, !cached)
+		xLog.Printf("Reloading cache for %s, forced:%t", cacheKey, !cached)
 		cached = false
 		err := updateCache(token, userObj)
 		if err != nil {
 			return nil, false, err
 		}
 	} else {
-		log.Printf("Cache hit for %s", cacheKey)
+		xLog.Printf("Cache hit for %s", cacheKey)
 	}
 
 	return userObj, cached, nil
