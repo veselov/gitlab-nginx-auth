@@ -188,7 +188,10 @@ log: gitlab-nginx.log
 
 # If enabled, then a ./refused_login endpoint will use this template
 # to display a page explaining why access has been refused. The template
-# receives a structure with "Url" string property and "Groups" string array.
+# receives a structure with "User" string property "Url" string property 
+# and "Groups" string array.
+# "User" is the username of the logged in Gitlab user, and is queried from Gitlab
+# unless a cached value is found.
 # "Url" is populated from the "from" URL parameter of the request, and
 # "Groups" is populated with all the groups, membership to any of which would
 # have allowed access to the resource.
@@ -208,7 +211,7 @@ sign-user-info:
   # here in the hexadecimal format.
   shared-key: 01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
   # algorithm to use for signing. The following algorithms are supported:
-  # EdDSA, ES256, ES384, ES512, RS256, RS384, RS512, PS256, PS384, PS512
+  # ECDSA, ES256, ES384, ES512, RS256, RS384, RS512, PS256, PS384, PS512
   # HS256, HS384, HS512 
   # See https://tools.ietf.org/html/rfc7515 for more information on the
   # algorithms.

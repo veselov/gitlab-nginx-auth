@@ -15,3 +15,4 @@
 # vendor/
 nginx-test/*
 
+gitlab-nginx-auth

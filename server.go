@@ -296,35 +296,8 @@ func main() {
 			now := time.Now().Unix()
 
 			if token == "" {
-
-				var jweCookie string
-				jweCookie, err = c.Cookie(cfg.CookieName)
-				if err != nil {
-					break
-				}
-				var jwe *jose.JSONWebEncryption
-				jwe, err = jose.ParseEncrypted(jweCookie)
-				if err != nil {
-					break
-				}
-				var jsonData []byte
-				jsonData, err = jwe.Decrypt(key[:])
-				if err != nil {
-					break
-				}
-				authData := AuthInfo{}
-				err = json.Unmarshal(jsonData, &authData)
-				if err != nil {
-					break
-				}
-
-				if authData.Expiry > 0 && authData.Expiry < now {
-					err = SimpleError{Err: fmt.Sprintf("token expired (at %d, now is %d), need to refresh", authData.Expiry, now)}
-					break
-				}
-
-				token = authData.Token
-
+				token, err = getCookieToken(c)
+				if err != nil { break }
 			}
 
 			var haveGroups *map[string]bool
@@ -518,12 +491,24 @@ func main() {
 			var uri = c.Query("from")
 			groups, _, _ := matchGroup(uri, nil)
 
+			var userName *string
+
+			token, err := getCookieToken(c)
+			if err == nil {
+				user, _, err := getUserInfo(token, true)
+				if err == nil {
+					userName = &user.UserName
+				}
+			}
+
 			err = refusedTemplate.Execute(c.Writer, struct {
 				Url    string
 				Groups []string
+				User   *string
 			}{
 				uri,
 				groups.List(),
+				userName,
 			})
 		}
 		if err != nil {
@@ -542,6 +527,39 @@ func main() {
 	if err != nil {
 		xLog.Printf("%s", err.Error())
 	}
+
+}
+
+func getCookieToken(c *gin.Context) (string, error) {
+
+	now := time.Now().Unix()
+
+	jweCookie, err := c.Cookie(cfg.CookieName)
+	if err != nil {
+		return "", err
+	}
+	var jwe *jose.JSONWebEncryption
+	jwe, err = jose.ParseEncrypted(jweCookie)
+	if err != nil {
+		return "", err
+	}
+	var jsonData []byte
+	jsonData, err = jwe.Decrypt(key[:])
+	if err != nil {
+		return "", err
+	}
+	authData := AuthInfo{}
+	err = json.Unmarshal(jsonData, &authData)
+	if err != nil {
+		return "", err
+	}
+
+	if authData.Expiry > 0 && authData.Expiry < now {
+		err = SimpleError{Err: fmt.Sprintf("token expired (at %d, now is %d), need to refresh", authData.Expiry, now)}
+		return "", err
+	}
+
+	return authData.Token, nil
 
 }
 
