@@ -17,7 +17,7 @@ The default authentication context is _gitlab (can be configured)
 
 Consider that GitLab is serving users at `http://gitlab.com`
 
-Choose the port that the authenticator will be running on, `<auth_port>`
+Choose the port the authenticator will be running on, `<auth_port>`
 
 ### Register GitLab application
 
@@ -182,7 +182,7 @@ log: gitlab-nginx.log
 # specify the amount of seconds the responses should be cached for.
 # Cache is reloaded after expiration, or if the user does not have any
 # of the groups required by the resource (so if the user is added to a 
-# missing group, it's not necessary to wait until the cache is expired
+# missing group, it's not necessary to wait until the cache expires
 # until the effects are registered)
 # data-cache-sec: 3600
 
@@ -238,6 +238,10 @@ a 204, or 403. Additionally, if configured so, the service will set a header fie
 authentication information that can be accessed by the final resource destination.
 In all other cases (cookie not found, access control cannot be extracted, GitLab
 rejects the groups list request), the service will return 401.
+
+The group values specified in the configurtion file are matched against `group.full_path` field of the
+GitLab group object returned by GitLab API. This corresponds to "full path" property statement available
+in the group description screen on GitLab UI.
 
 Once 401 is returned, NginX will redirect the user to <auth_context>/init_login, preserving
 the resource URL that was being accessed in the redirected URL. This will

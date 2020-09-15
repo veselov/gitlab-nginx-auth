@@ -76,7 +76,7 @@ type SignedUserInfo struct {
 }
 
 type GitlabGroup struct {
-	Name string `json:"name"`
+	Id string `json:"full_path"`
 }
 
 type AuthInfo struct {
@@ -297,13 +297,17 @@ func main() {
 
 			if token == "" {
 				token, err = getCookieToken(c)
-				if err != nil { break }
+				if err != nil {
+					break
+				}
 			}
 
 			var haveGroups *map[string]bool
 			var signature *string
 			cached := true
 			var patternMatched bool
+
+			var ok *MatchResult
 
 			for {
 
@@ -312,13 +316,11 @@ func main() {
 					break
 				}
 
-				var ok *MatchResult
-
 				_, patternMatched, ok = matchGroup(uri, haveGroups)
 				if ok != nil {
 					xLog.Printf("Request allowed, uri %s matched pattern %s, user has group %s\n", uri, ok.Pattern, ok.Group)
 					c.Status(204)
-					return
+					break
 				}
 
 				if !cached {
@@ -338,9 +340,24 @@ func main() {
 				c.Header(cfg.SignUserInfo.HeaderName, *signature)
 			}
 
+			if ok != nil {
+				return
+			}
+
 			var err403 string
 			if patternMatched {
-				err403 = fmt.Sprintf("User had no groups required for %s", uri)
+				groupList := ""
+				for group, is := range *haveGroups {
+					if "" != groupList {
+						groupList += ","
+					}
+					if !is {
+						// that should be impossible
+						groupList += "!"
+					}
+					groupList += group
+				}
+				err403 = fmt.Sprintf("User had no groups required for %s, known groups:%s", uri, groupList)
 			} else {
 				err403 = fmt.Sprintf("No patterns match uri %s", uri)
 			}
@@ -612,7 +629,7 @@ func getUserData(token string, now int64, cache bool) (*map[string]bool, *string
 
 		var groupNames []string
 		for _, group := range *groups {
-			groupNames = append(groupNames, group.Name)
+			groupNames = append(groupNames, group.Id)
 		}
 
 		objToSign := SignedUserInfo{
@@ -650,7 +667,7 @@ func getUserData(token string, now int64, cache bool) (*map[string]bool, *string
 
 	haveGroups := map[string]bool{}
 	for _, ch := range *groups {
-		haveGroups[ch.Name] = true
+		haveGroups[ch.Id] = true
 	}
 
 	return &haveGroups, signature, cached, nil
