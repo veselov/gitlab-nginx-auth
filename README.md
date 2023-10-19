@@ -7,6 +7,8 @@ The service can additionally provide trusted authentication information to the r
 
 Its use requires [ngx_http_js_module][1].
 
+License: GPL-3.0-or-later
+
 ## Set-up
 
 Consider that NginX is used to serve some content on a 
