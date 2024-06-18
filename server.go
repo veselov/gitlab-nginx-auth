@@ -15,7 +15,7 @@ import (
 	"github.com/peterhellberg/link"
 	"github.com/scylladb/go-set/strset"
 	"github.com/ztrue/tracerr"
-	"gopkg.in/square/go-jose.v2"
+	"gopkg.in/go-jose/go-jose.v2"
 	"gopkg.in/yaml.v2"
 	"html/template"
 	"io/ioutil"
